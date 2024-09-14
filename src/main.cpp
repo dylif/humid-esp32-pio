@@ -1,6 +1,8 @@
 #include "config.hpp"
+#include "neopixel.hpp"
 
 #include <array>
+#include <functional>
 
 #include <Adafruit_NeoPixel.h>
 #include <Adafruit_SHT4x.h>
@@ -10,68 +12,64 @@
 #include <Wire.h>
 
 static void giveUp();
-static void setNeoPixel();
 static bool getAndSendMeasurements();
+static bool waitForConditionWithTimeout(uint8_t timeoutSec,
+                                        std::function<bool()> condition);
 static bool connect();
 
-static Adafruit_NeoPixel pixel(neoPixelCount, PIN_NEOPIXEL, NEO_GRB + NEO_KHZ800);
+static NeoPixel neopixel(neoPixelTrying);
 static Adafruit_SHT4x sht4x;
 static Espressif_MQTT_Client mqttClient;
 static ThingsBoard tb(mqttClient);
 
-static unsigned long lastMeasureMsec = 0;
+static unsigned long lastMeasureMsec;
 
 void setup() {
     Serial.begin(serialBaud);
 
-    setNeoPixel();
+    neopixel.begin();
 
     // Delay before starting program to allow serial monitor to connect
     delay(startDelayMsec);
 
-    setupSht4x();
-}
-
-void loop() {
-    if (connect() && getAndSendMeasurements()) {
-        lastMeasureMsec = millis();
-    }
-
-    tb.loop();
-}
-
-void giveUp() {
-    while (true) {
-        // Do nothing
-    }
-}
-
-void setNeoPixel() {
-#if defined(NEOPIXEL_POWER)
-    pinMode(NEOPIXEL_POWER, OUTPUT);
-    digitalWrite(NEOPIXEL_POWER, HIGH);
-#endif
-
-    pixel.begin();
-    pixel.setBrightness(neoPixelBrightness);
-
-    // Set NeoPixel to orange
-    pixel.fill(neoPixelColor);
-    pixel.show();
-}
-
-void setupSht4x() {
+    // Setup SHT4x sensor
     Wire1.begin();
     if (!sht4x.begin(&Wire1)) {
         Serial.println("Failed to connect to SHT4x sensor!");
         giveUp();
     }
     Serial.println("Connected to SHT4x sensor.");
+
+    lastMeasureMsec = millis();
 }
 
-bool getAndSendMeasurements() {
-    if ((millis() - lastMeasureMsec) < measurePeriodMsec) {
+void loop() {
+    tb.loop();
+
+    if (connect()) {
+        neopixel.set(neoPixelNormal);
+        if (getAndSendMeasurements()) {
+            lastMeasureMsec = millis();
+        }
+    } else {
+        neopixel.set(neoPixelTrying);
+    }
+}
+
+static void giveUp() {
+    neopixel.set(neoPixelHalted);
+    Serial.println("Fatal error!");
+    while (true) {
+        // Do nothing
+    }
+}
+
+static bool getAndSendMeasurements() {
+    unsigned long delta = millis() - lastMeasureMsec;
+    if (delta < measurePeriodMsec) {
         return false;
+    } else if (delta > measureGiveUpMsec) {
+        giveUp();
     }
 
     sensors_event_t humidityEvent;
@@ -80,45 +78,53 @@ bool getAndSendMeasurements() {
         Serial.println("Failed to get measurements from SHT4x sensor!");
         return false;
     }
-    float humidity = humidityEvent.relative_humidity;
-    float temperature = temperatureEvent.temperature;
+    const float humidity = humidityEvent.relative_humidity;
+    const float temperature = temperatureEvent.temperature;
     
-    Serial.printf("Read measurements: humidity = %05.2f, temperature = %05.2f\r\n", humidity, temperature);
-    auto telemetry = {Telemetry("humidity", humidity), Telemetry("temperature", temperature)};
+    Serial.printf("delta = %lu, humidity = %05.2f, temperature = %05.2f\r\n",
+                  delta,
+                  humidity,
+                  temperature);
+
+    const auto telemetry = {Telemetry("humidity", humidity),
+                            Telemetry("temperature", temperature)};
 
     return tb.sendTelemetry(telemetry.begin(), telemetry.end());
 }
 
-bool connect() {
+static bool waitForConditionWithTimeout(uint8_t timeoutSec,
+                                        std::function<bool()> condition) {
+    for (uint8_t i = 0; i < timeoutSec; i++) {
+        if (condition()) {
+            break;
+        }
+        delay(1000);
+        Serial.printf("%02u/%02u seconds elapsed...\r\n", i + 1, timeoutSec);
+    }
+    
+    return condition();
+}
+
+static bool connect() {
     if (tb.connected()) {
         return true;
     }
 
     Serial.println("Connecting to Wi-Fi...");
     WiFi.begin(wifiSsid, wifiPass);
-    for (uint8_t i = 0; i < wifiConnectTimeoutSec; i++) {
-        if (WiFi.status() == WL_CONNECTED) {
-            break;
-        }
-        delay(1000);
-        Serial.printf("%2u/%2u seconds elapsed\r\n", i + 1, wifiConnectTimeoutSec);
-    }
-    if (WiFi.status() != WL_CONNECTED) {
+    if (!waitForConditionWithTimeout(
+            wifiConnectTimeoutSec,
+            std::bind(&WiFiClass::isConnected, WiFi))) {
         Serial.println("Failed to connect to Wi-Fi!");
         return false;
     }
     Serial.println("Connected to Wi-Fi.");
 
     Serial.println("Connecting to ThingsBoard...");
-    for (uint8_t i = 0; i < thingsBoardConnectTimeoutSec; i++) {
-        if (tb.connect(thingsBoardHost, thingsBoardAccessToken)) {
-            break;
-        }
-
-        delay(1000);
-        Serial.printf("%2u/%2u seconds elapsed\r\n", i + 1, thingsBoardConnectTimeoutSec);
-    }
-    if (!tb.connected()) {
+    tb.connect(thingsBoardHost, thingsBoardAccessToken);
+    if (!waitForConditionWithTimeout(
+            thingsBoardConnectTimeoutSec,
+            std::bind(&ThingsBoard::connected, tb))) {
         Serial.println("Failed to connect to ThingsBoard!");
         return false;
     }

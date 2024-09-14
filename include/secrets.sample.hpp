@@ -1,3 +1,5 @@
+#pragma once
+
 static constexpr auto wifiSsid = "secretSsid";
 static constexpr auto wifiPass = "secretPass";
 
