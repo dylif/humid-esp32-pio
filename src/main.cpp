@@ -11,18 +11,19 @@
 #include <WiFi.h>
 #include <Wire.h>
 
-static void giveUp();
-static bool getAndSendMeasurements();
+static void fatalError();
+static bool getMeasurements(float &humidity, float &temperature);
+static bool sendMeasurements(float humidity, float temperature);
 static bool waitForConditionWithTimeout(uint8_t timeoutSec,
                                         std::function<bool()> condition);
 static bool connect();
 
-static NeoPixel neopixel(neoPixelTrying);
+static NeoPixel neopixel(neoPixelSendAttempt);
 static Adafruit_SHT4x sht4x;
 static Espressif_MQTT_Client mqttClient;
 static ThingsBoard tb(mqttClient);
 
-static unsigned long lastMeasureMsec;
+static unsigned long lastSendMsec;
 
 void setup() {
     Serial.begin(serialBaud);
@@ -36,56 +37,82 @@ void setup() {
     Wire1.begin();
     if (!sht4x.begin(&Wire1)) {
         Serial.println("Failed to connect to SHT4x sensor!");
-        giveUp();
+        fatalError();
     }
     Serial.println("Connected to SHT4x sensor.");
 
-    lastMeasureMsec = millis();
+    lastSendMsec = millis();
 }
 
 void loop() {
     tb.loop();
 
-    if (connect()) {
-        neopixel.set(neoPixelNormal);
-        if (getAndSendMeasurements()) {
-            lastMeasureMsec = millis();
-        }
-    } else {
-        neopixel.set(neoPixelTrying);
+    unsigned long delta = millis() - lastSendMsec;
+
+    if (delta > giveUpMsec) {
+        Serial.printf("Failed to send measurements in %lu milliseconds!\r\n",
+                      giveUpMsec);
+        fatalError();
     }
+
+    auto periodExpired = delta > measurePeriodMsec;
+
+    if (periodExpired) {
+        neopixel.set(neoPixelSendAttempt);
+    }
+
+    if (!connect()) {
+        return;
+    }
+
+    if (!periodExpired) {
+        return;
+    }
+
+    float humidity;
+    float temperature;
+    if (!getMeasurements(humidity, temperature)) {
+        Serial.println("Failed to get measurements from SHT4x sensor!");
+        return;
+    }
+
+    Serial.printf(
+        "delta = %lu, humidity = %05.2f, temperature = %05.2f\r\n",
+        delta,
+        humidity,
+        temperature);
+
+    if (!sendMeasurements(humidity, temperature)) {
+        Serial.println("Failed to send measurements to ThingsBoard!");
+        return;
+    }
+
+    lastSendMsec = millis();
+    neopixel.set(neoPixelSendSuccess);
 }
 
-static void giveUp() {
-    neopixel.set(neoPixelHalted);
-    Serial.println("Fatal error!");
+static void fatalError() {
+    neopixel.set(neoPixelFatalError);
+    Serial.println("Fatal error! Reset required!");
     while (true) {
         // Do nothing
     }
 }
 
-static bool getAndSendMeasurements() {
-    unsigned long delta = millis() - lastMeasureMsec;
-    if (delta < measurePeriodMsec) {
-        return false;
-    } else if (delta > measureGiveUpMsec) {
-        giveUp();
-    }
-
+static bool getMeasurements(float &humidity, float &temperature) {
     sensors_event_t humidityEvent;
     sensors_event_t temperatureEvent;
     if (!sht4x.getEvent(&humidityEvent, &temperatureEvent)) {
-        Serial.println("Failed to get measurements from SHT4x sensor!");
         return false;
     }
-    const float humidity = humidityEvent.relative_humidity;
-    const float temperature = temperatureEvent.temperature;
-    
-    Serial.printf("delta = %lu, humidity = %05.2f, temperature = %05.2f\r\n",
-                  delta,
-                  humidity,
-                  temperature);
 
+    humidity = humidityEvent.relative_humidity;
+    temperature = temperatureEvent.temperature;
+
+    return true;
+}
+
+static bool sendMeasurements(float humidity, float temperature) {
     const auto telemetry = {Telemetry("humidity", humidity),
                             Telemetry("temperature", temperature)};
 
@@ -101,7 +128,7 @@ static bool waitForConditionWithTimeout(uint8_t timeoutSec,
         delay(1000);
         Serial.printf("%02u/%02u seconds elapsed...\r\n", i + 1, timeoutSec);
     }
-    
+
     return condition();
 }
 
