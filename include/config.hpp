@@ -6,10 +6,10 @@
 #include <cstdint>
 
 static constexpr unsigned long serialBaud = 115200;
-static constexpr uint8_t wifiConnectTimeoutSec = 10;
-static constexpr uint8_t thingsBoardConnectTimeoutSec = 10;
-static constexpr unsigned long measurePeriodMsec = 5000;
-static constexpr unsigned long giveUpMsec = 30000;
+static constexpr uint8_t wifiConnectTimeoutSec = 30;
+static constexpr uint8_t thingsBoardConnectTimeoutSec = 30;
+static constexpr unsigned long measurePeriodMsec = 60000;
+static constexpr unsigned long giveUpMsec = 180000;
 static constexpr uint32_t startDelayMsec = 5000;
 
 static_assert(measurePeriodMsec < giveUpMsec);
