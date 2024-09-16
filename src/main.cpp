@@ -11,7 +11,7 @@
 #include <WiFi.h>
 #include <Wire.h>
 
-static void fatalError();
+[[noreturn]] static void fatalError();
 static bool getMeasurements(float &humidity, float &temperature);
 static bool sendMeasurements(float humidity, float temperature);
 static bool waitForConditionWithTimeout(uint8_t timeoutSec,
@@ -91,7 +91,7 @@ void loop() {
     neopixel.set(neoPixelSendSuccess);
 }
 
-static void fatalError() {
+[[noreturn]] static void fatalError() {
     neopixel.set(neoPixelFatalError);
     Serial.println("Fatal error! Reset required!");
     while (true) {
