@@ -45,6 +45,8 @@ void setup() {
 }
 
 void loop() {
+    // Espressif_MQTT_Client apparently uses its own task to send and receive
+    // messages, so this isn't necessary but done for clarity and portability
     tb.loop();
 
     unsigned long delta = millis() - lastSendMsec;
