@@ -61,6 +61,7 @@ void loop() {
         neopixel.set(neoPixelSendAttempt);
     }
 
+    // Even if the period isn't expired, try to connect
     if (!connect()) {
         return;
     }
