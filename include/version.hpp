@@ -8,4 +8,4 @@ struct Version {
     uint16_t patch;
 };
 
-static constexpr Version currentVersion = { 0, 0, 0 };
+static constexpr Version currentVersion = { 0, 1, 0 };
