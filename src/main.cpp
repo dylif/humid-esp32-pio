@@ -1,7 +1,7 @@
 #include "config.hpp"
 #include "neopixel.hpp"
+#include "version.hpp"
 
-#include <array>
 #include <functional>
 
 #include <Adafruit_NeoPixel.h>
@@ -11,12 +11,15 @@
 #include <WiFi.h>
 #include <Wire.h>
 
+static void mainRoutine(bool periodExpired);
 [[noreturn]] static void fatalError();
 static bool getMeasurements(float &humidity, float &temperature);
 static bool sendMeasurements(float humidity, float temperature);
+static bool sendCurrentVersion();
 static bool waitForConditionWithTimeout(uint8_t timeoutSec,
                                         std::function<bool()> condition);
-static bool connect();
+static bool connectToWifi();
+static bool connectToThingsBoard();
 
 static NeoPixel neopixel(neoPixelSendAttempt);
 static Adafruit_SHT4x sht4x;
@@ -24,6 +27,7 @@ static Espressif_MQTT_Client mqttClient;
 static ThingsBoard tb(mqttClient);
 
 static unsigned long lastSendMsec;
+static bool currentVersionSent = false;
 
 void setup() {
     Serial.begin(serialBaud);
@@ -41,7 +45,7 @@ void setup() {
     }
     Serial.println("Connected to SHT4x sensor.");
 
-    lastSendMsec = millis();
+    mainRoutine(true);
 }
 
 void loop() {
@@ -50,22 +54,37 @@ void loop() {
     std::ignore = tb.loop();
 
     unsigned long delta = millis() - lastSendMsec;
-
     if (delta > giveUpMsec) {
         Serial.printf("Failed to send measurements in %lu milliseconds!\r\n",
                       giveUpMsec);
         fatalError();
     }
-
     auto periodExpired = delta > measurePeriodMsec;
+    mainRoutine(periodExpired);
+}
 
+static void mainRoutine(bool periodExpired) {
     if (periodExpired) {
         neopixel.set(neoPixelSendAttempt);
     }
 
-    // Even if the period isn't expired, try to connect
-    if (!connect()) {
+    // Even if the period isn't expired, make sure we're connected
+    if (!connectToWifi()) {
+        Serial.println("Failed to connect to Wi-Fi!");
         return;
+    }
+    if (!connectToThingsBoard()) {
+        Serial.println("Failed to connect to ThingsBoard!");
+        return;
+    }
+
+    if (!currentVersionSent) {
+        currentVersionSent = sendCurrentVersion();
+        if (currentVersionSent) {
+            Serial.println("Sent version information.");
+        } else {
+            Serial.println("Failed to send version information!");
+        }
     }
 
     if (!periodExpired) {
@@ -79,19 +98,19 @@ void loop() {
         return;
     }
 
-    Serial.printf(
-        "delta = %lu, humidity = %05.2f, temperature = %05.2f\r\n",
-        delta,
-        humidity,
-        temperature);
-
     if (!sendMeasurements(humidity, temperature)) {
         Serial.println("Failed to send measurements to ThingsBoard!");
         return;
     }
+    Serial.printf(
+        "Sent measurements: humidity = %05.2f, temperature = %05.2f\r\n",
+        humidity,
+        temperature);
 
     lastSendMsec = millis();
     neopixel.set(neoPixelSendSuccess);
+
+    Serial.printf("Waiting for %lu ms...\r\n", measurePeriodMsec);
 }
 
 [[noreturn]] static void fatalError() {
@@ -116,8 +135,20 @@ static bool getMeasurements(float &humidity, float &temperature) {
 }
 
 static bool sendMeasurements(float humidity, float temperature) {
-    const auto telemetry = {Telemetry("humidity", humidity),
-                            Telemetry("temperature", temperature)};
+    const auto telemetry = {
+        Telemetry("humidity", humidity),
+        Telemetry("temperature", temperature),
+    };
+
+    return tb.sendTelemetry(telemetry.begin(), telemetry.end());
+}
+
+static bool sendCurrentVersion() {
+    const auto telemetry = {
+        Telemetry("version_major", currentVersion.major),
+        Telemetry("version_minor", currentVersion.minor),
+        Telemetry("version_patch", currentVersion.patch),
+    };
 
     return tb.sendTelemetry(telemetry.begin(), telemetry.end());
 }
@@ -135,30 +166,28 @@ static bool waitForConditionWithTimeout(uint8_t timeoutSec,
     return condition();
 }
 
-static bool connect() {
-    if (tb.connected()) {
+static bool connectToWifi() {
+    auto connected = std::bind(&WiFiClass::isConnected, WiFi);
+
+    if (connected()) {
         return true;
     }
 
     Serial.println("Connecting to Wi-Fi...");
     WiFi.begin(wifiSsid, wifiPass);
-    if (!waitForConditionWithTimeout(
-            wifiConnectTimeoutSec,
-            std::bind(&WiFiClass::isConnected, WiFi))) {
-        Serial.println("Failed to connect to Wi-Fi!");
-        return false;
+
+    return waitForConditionWithTimeout(wifiConnectTimeoutSec, connected);
+}
+
+static bool connectToThingsBoard() {
+    auto connected = std::bind(&ThingsBoard::connected, tb);
+
+    if (connected()) {
+        return true;
     }
-    Serial.println("Connected to Wi-Fi.");
 
     Serial.println("Connecting to ThingsBoard...");
     tb.connect(thingsBoardHost, thingsBoardAccessToken);
-    if (!waitForConditionWithTimeout(
-            thingsBoardConnectTimeoutSec,
-            std::bind(&ThingsBoard::connected, tb))) {
-        Serial.println("Failed to connect to ThingsBoard!");
-        return false;
-    }
-    Serial.println("Connected to ThingsBoard.");
 
-    return true;
+    return waitForConditionWithTimeout(thingsBoardConnectTimeoutSec, connected);
 }
